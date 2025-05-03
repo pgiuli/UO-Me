@@ -30,10 +30,12 @@ function WhatYouOweSection({
   shares,
   paymentTitles,
   usernames,
+  paymentPayers,
 }: {
   shares: Share[];
   paymentTitles: Record<number, string>;
   usernames: Record<number, string>;
+  paymentPayers: Record<number, number>;
 }) {
   if (shares.length === 0) {
     return <div className="text-gray-500">You do not owe anything.</div>;
@@ -46,23 +48,10 @@ function WhatYouOweSection({
           className="min-w-[220px] bg-white rounded shadow p-4 flex flex-col gap-2 items-start"
         >
           <span className="font-bold">
-            {paymentTitles[share.payment_id] || (() => {
-              // Fetch payment title if not present
-              fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${share.payment_id}`, {
-                credentials: "include",
-              })
-                .then(res => res.ok ? res.json() : null)
-                .then(data => {
-                  if (data && data.title) {
-                    // Update paymentTitles state if possible
-                    // This assumes setPaymentTitles is available in scope (not here)
-                  }
-                });
-              return `Payment #${share.payment_id}`;
-            })()}
+            {paymentTitles[share.payment_id] || `Payment #${share.payment_id}`}
           </span>
           <span className="text-gray-600 text-sm">
-            Owed to: {usernames[share.user_id] || share.user_id}
+            Owed to: {usernames[paymentPayers[share.payment_id]] || paymentPayers[share.payment_id] || "Unknown"}
           </span>
           <span className="text-lg font-semibold text-red-600">
             {share.amount}€
@@ -92,7 +81,7 @@ function PaymentsCreatedSection({
   const [openId, setOpenId] = useState<number | null>(null);
 
   return (
-    <section  >
+    <section>
       <h2 className="text-lg font-semibold mb-2">Payments You Created</h2>
       <ul className="flex flex-col gap-2">
         {payments.length === 0 && (
@@ -173,6 +162,7 @@ export default function DashboardPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [usernames, setUsernames] = useState<Record<number, string>>({});
   const [paymentTitles, setPaymentTitles] = useState<Record<number, string>>({});
+  const [paymentPayers, setPaymentPayers] = useState<Record<number, number>>({});
   const [error, setError] = useState<string | null>(null);
 
   // Fulfill modal state
@@ -199,10 +189,10 @@ export default function DashboardPage() {
       .catch(() => setError("Failed to load what you owe"));
   }, []);
 
-  // Fetch payment titles for whatYouOwe shares
+  // Fetch payment titles and payer IDs for whatYouOwe shares
   useEffect(() => {
     const ids = Array.from(new Set(whatYouOwe.map(s => s.payment_id)));
-    const missing = ids.filter(id => !(id in paymentTitles));
+    const missing = ids.filter(id => !(id in paymentTitles) || !(id in paymentPayers));
     if (missing.length === 0) return;
     Promise.all(
       missing.map(id =>
@@ -210,14 +200,21 @@ export default function DashboardPage() {
           credentials: "include",
         })
           .then(res => res.ok ? res.json() : null)
-          .then(data => ({ id, title: data?.title || `Payment #${id}` }))
+          .then(data => ({
+            id,
+            title: data?.title || `Payment #${id}`,
+            payer_id: data?.payer_id,
+          }))
       )
     ).then(results => {
       const newTitles = { ...paymentTitles };
-      results.forEach(({ id, title }) => {
+      const newPayers = { ...paymentPayers };
+      results.forEach(({ id, title, payer_id }) => {
         newTitles[id] = title;
+        if (payer_id) newPayers[id] = payer_id;
       });
       setPaymentTitles(newTitles);
+      setPaymentPayers(newPayers);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whatYouOwe]);
@@ -251,12 +248,16 @@ export default function DashboardPage() {
       .catch(() => setError("Failed to load your payments"));
   }, []);
 
-  // Fetch usernames for all relevant user_ids
+  // Fetch usernames for all relevant user_ids (including payers)
   useEffect(() => {
     const ids = new Set<number>();
-    payments.forEach((p) => p.shares.forEach((s) => ids.add(s.user_id)));
+    payments.forEach((p) => {
+      ids.add(p.payer_id);
+      p.shares.forEach((s) => ids.add(s.user_id));
+    });
     owedToMe.forEach((s) => ids.add(s.user_id));
     whatYouOwe.forEach((s) => ids.add(s.user_id));
+    Object.values(paymentPayers).forEach((id) => ids.add(id));
     const uniqueIds = Array.from(ids).filter((id) => !(id in usernames));
     if (uniqueIds.length === 0) return;
     Promise.all(
@@ -275,7 +276,7 @@ export default function DashboardPage() {
       setUsernames(newNames);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [payments, owedToMe, whatYouOwe]);
+  }, [payments, owedToMe, whatYouOwe, paymentPayers]);
 
   const handleDelete = async (paymentId: number) => {
     try {
@@ -349,6 +350,7 @@ export default function DashboardPage() {
             shares={whatYouOwe}
             paymentTitles={paymentTitles}
             usernames={usernames}
+            paymentPayers={paymentPayers}
           />
         </section>
         <PaymentsCreatedSection
