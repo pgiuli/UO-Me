@@ -134,7 +134,7 @@
 - **Request Body**:
     ```json
     {
-        "id": 1,
+        "title": "string",
         "description": "string",
         "total_amount": 100.0,
         "shares": [
@@ -364,3 +364,25 @@
         "detail": "Invalid token"
     }
     ```
+    ### Search Users
+    - **Endpoint**: `/api/users/search`
+    - **Method**: `GET`
+    - **Headers**:
+        - `Authorization: Bearer <access_token>`
+    - **Query Parameters**:
+        - `query`: The username search string.
+    - **Response**:
+        ```json
+        [
+            {
+                "id": 3,
+                "username": "searched_user"
+            }
+        ]
+        ```
+    - **Error Response**:
+        ```json
+        {
+            "detail": "Invalid token"
+        }
+        ```

@@ -11,6 +11,7 @@ from typing import List, Optional
 from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, Text
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from datetime import datetime, timedelta
+from sqlalchemy import or_
 
 # --- Database setup ---
 DATABASE_URL = "sqlite:///./uo_me.db"
@@ -34,6 +35,7 @@ class Payment(Base):
     __tablename__ = "payments"
     id = Column(Integer, primary_key=True, index=True)
     payer_id = Column(Integer, ForeignKey("users.id"))
+    title = Column(String)
     description = Column(Text)
     total_amount = Column(Float)
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
@@ -77,6 +79,7 @@ class PaymentShare(BaseModel):
     amount: float
 
 class PaymentCreate(BaseModel):
+    title: str
     description: str
     total_amount: float
     shares: List[PaymentShare]
@@ -90,7 +93,8 @@ class PaymentOut(BaseModel):
     shares: List[PaymentShare]
     all_fulfilled: bool
     expired: bool
-
+class ShareAccept(BaseModel):
+    share_id: int
 class ShareFulfill(BaseModel):
     share_id: int
     amount: float
@@ -244,6 +248,13 @@ def get_profile(current_user: User = Depends(get_current_user)):
         "profile_picture": current_user.profile_picture
     }
 
+@app.get("/api/users/{user_id}")
+def get_user_by_id(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"id": user.id, "username": user.username}
+
 @app.put("/api/users/profile")
 def update_profile(update: UserProfileUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if update.username:
@@ -262,61 +273,64 @@ def delete_profile(db: Session = Depends(get_db), current_user: User = Depends(g
 
 # --- Payments ---
 @app.post("/api/payments/create")
-def create_payment(payment: PaymentCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    participant_ids = [share.user_id for share in payment.shares]
+def create_payment(
+    payment: PaymentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Validate shares sum
+    total_share = sum(share.amount for share in payment.shares)
+    if abs(total_share - payment.total_amount) > 1e-6:
+        raise HTTPException(status_code=400, detail="Shares must sum up to total_amount")
 
-    # Check all users exist
-    for pid in participant_ids:
-        if not user_exists(pid, db):
-            raise HTTPException(status_code=400, detail=f"User {pid} does not exist")
+    # Get payer's friends (accepted friendships)
+    friends = db.query(Friendship.friend_id).filter(
+        Friendship.user_id == current_user.id,
+        Friendship.status == "accepted"
+    ).all()
+    friend_ids = {fid for (fid,) in friends}
+    allowed_user_ids = friend_ids | {current_user.id}
 
-    # Check all participants are friends with the creator (current_user)
-    for pid in participant_ids:
-        if pid == current_user.id:
-            continue  # Allow self
-        friendship = db.query(Friendship).filter(
-            Friendship.user_id == current_user.id,
-            Friendship.friend_id == pid,
-            Friendship.status == "accepted"
-        ).first()
-        if not friendship:
+    # Validate all share user_ids
+    for share in payment.shares:
+        if share.user_id not in allowed_user_ids:
             raise HTTPException(
                 status_code=400,
-                detail=f"User {pid} is not your friend"
+                detail=f"User {share.user_id} is not the payer or a friend of the payer"
             )
 
-    # Check that all shares sum to the total_amount
-    total_shares = sum(share.amount for share in payment.shares)
-    if abs(total_shares - payment.total_amount) > 0.01:
-        raise HTTPException(
-            status_code=400,
-            detail="Sum of shares does not equal total payment amount"
-        )
-
+    # Create payment
     db_payment = Payment(
         payer_id=current_user.id,
+        title=payment.title,
         description=payment.description,
         total_amount=payment.total_amount,
         created_at=datetime.utcnow().isoformat(),
-        expired=0
+        # Store due_date as string if provided, else None
+        # You may want to add a due_date column to Payment model for production
     )
+    if payment.due_date:
+        # Optionally, you can store due_date in a custom attribute or extend the Payment model
+        setattr(db_payment, "due_date", payment.due_date)
     db.add(db_payment)
     db.commit()
     db.refresh(db_payment)
+
+    # Create shares
     for share in payment.shares:
-        is_fulfilled = 1 if share.user_id == current_user.id else 0
-        is_accepted = 1 if share.user_id == current_user.id else 0
         db_share = Share(
             payment_id=db_payment.id,
             owed_by_id=share.user_id,
             amount=share.amount,
-            fulfilled=is_fulfilled,
-            accepted=is_accepted,
+            fulfilled=0,
+            accepted=0,
             created_at=datetime.utcnow().isoformat()
         )
         db.add(db_share)
     db.commit()
-    return {"message": "Payment created successfully"}
+
+    return {"message": "Payment and shares created successfully", "payment_id": db_payment.id}
+
 
 @app.get("/api/payments", response_model=List[PaymentOut])
 def get_payments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -337,8 +351,56 @@ def get_payments(db: Session = Depends(get_db), current_user: User = Depends(get
         ))
     return result
 
+@app.get("/api/payments/{payment_id}")
+def get_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    # Check if user is involved (payer or has a share)
+    user_share = db.query(Share).filter(
+        Share.payment_id == payment_id,
+        Share.owed_by_id == current_user.id
+    ).first()
+    if not user_share and payment.payer_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to view this payment")
+
+    # Get all shares for this payment
+    shares = db.query(Share).filter(Share.payment_id == payment_id).all()
+    shares_data = [
+        {
+            "user_id": s.owed_by_id,
+            "amount": s.amount,
+            "accepted": bool(s.accepted),
+            "fulfilled": bool(s.fulfilled)
+        }
+        for s in shares
+    ]
+
+    # Try to get due_date if present (may not exist)
+    due_date = getattr(payment, "due_date", None)
+
+    return {
+        "id": payment.id,
+        "title": payment.title,
+        "description": payment.description,
+        "total_amount": payment.total_amount,
+        "payer_id": payment.payer_id,
+        "created_at": payment.created_at,
+        "due_date": due_date,
+        "expired": bool(payment.expired),
+        "shares": shares_data
+    }
+
+
 # --- Expire Payments ---
 from fastapi_utils.tasks import repeat_every
+from fastapi import Path
+from fastapi import Query
 
 @app.on_event("startup")
 @repeat_every(seconds=60)  # Check every minute
@@ -359,6 +421,15 @@ def expire_payments_task():
 @app.get("/api/shares")
 def get_shares(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     shares = db.query(Share).filter(Share.owed_by_id == current_user.id).all()
+    result = [{ 
+        "id": s.id,
+        "payment_id": s.payment_id,
+        "user_id": s.owed_by_id,
+        "amount": s.amount,
+        "status": "fulfilled" if s.fulfilled else "pending",
+        "accepted": bool(s.accepted)
+    } for s in shares]
+    print(result)
     return [
         {
             "id": s.id,
@@ -371,14 +442,34 @@ def get_shares(db: Session = Depends(get_db), current_user: User = Depends(get_c
     ]
 
 @app.post("/api/shares/accept")
-def accept_share(share_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    share = db.query(Share).filter(Share.id == share_id, Share.owed_by_id == current_user.id).first()
+def accept_share(
+    accept: ShareAccept,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    share = db.query(Share).filter(Share.id == accept.share_id, Share.owed_by_id == current_user.id).first()
     if not share:
         raise HTTPException(status_code=404, detail="Share not found")
     if share.accepted:
         return {"message": "Share already accepted"}
     share.accepted = 1
     db.commit()
+
+    # --- New logic: auto-accept and fulfill payer's share if all others are accepted ---
+    payment = db.query(Payment).filter(Payment.id == share.payment_id).first()
+    if payment:
+        shares = db.query(Share).filter(Share.payment_id == payment.id).all()
+        payer_share = db.query(Share).filter(
+            Share.payment_id == payment.id,
+            Share.owed_by_id == payment.payer_id
+        ).first()
+        non_payer_shares = [s for s in shares if s.owed_by_id != payment.payer_id]
+        if non_payer_shares and all(s.accepted for s in non_payer_shares):
+            if payer_share and not payer_share.accepted:
+                payer_share.accepted = 1
+                payer_share.fulfilled = 1
+                db.commit()
+
     return {"message": "Share accepted"}
 
 @app.post("/api/shares/fulfill")
@@ -398,28 +489,136 @@ def fulfill_share(fulfill: ShareFulfill, db: Session = Depends(get_db), current_
     db.commit()
     return {"message": "Share fulfilled successfully"}
 
+@app.get("/api/shares/owed-to-me")
+def get_unfulfilled_shares_owed_to_me(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    shares = (
+        db.query(Share)
+        .join(Payment, Share.payment_id == Payment.id)
+        .filter(
+            Payment.payer_id == current_user.id,
+            Share.owed_by_id != current_user.id,
+            Share.fulfilled == 0,
+            Share.accepted == 1
+        )
+        .all()
+    )
+    return [
+        {
+            "id": s.id,
+            "payment_id": s.payment_id,
+            "user_id": s.owed_by_id,
+            "amount": s.amount,
+            "accepted": bool(s.accepted),
+            "fulfilled": bool(s.fulfilled)
+        }
+        for s in shares
+    ]
+
 # --- Friendships ---
 @app.post("/api/friendships/request")
-def send_friend_request(req: FriendRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def send_friend_request(
+    req: FriendRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     if req.friend_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot send friend request to yourself")
     if not user_exists(req.friend_id, db):
         raise HTTPException(status_code=400, detail="User does not exist")
-    if db.query(Friendship).filter(Friendship.user_id == current_user.id, Friendship.friend_id == req.friend_id).first():
+
+    # Check if already friends
+    existing_friendship = db.query(Friendship).filter(
+        Friendship.user_id == current_user.id,
+        Friendship.friend_id == req.friend_id,
+        Friendship.status == "accepted"
+    ).first()
+    if existing_friendship:
+        raise HTTPException(status_code=400, detail="You are already friends")
+
+    # Check if request already sent
+    already_sent = db.query(Friendship).filter(
+        Friendship.user_id == current_user.id,
+        Friendship.friend_id == req.friend_id,
+        Friendship.status == "pending"
+    ).first()
+    if already_sent:
         raise HTTPException(status_code=400, detail="Request already sent")
+
+    # Check if there is an incoming pending request from the target user
+    incoming = db.query(Friendship).filter(
+        Friendship.user_id == req.friend_id,
+        Friendship.friend_id == current_user.id,
+        Friendship.status == "pending"
+    ).first()
+    if incoming:
+        # Accept both friendships directly
+        incoming.status = "accepted"
+        # Create reverse friendship as accepted if not exists
+        reverse = db.query(Friendship).filter(
+            Friendship.user_id == current_user.id,
+            Friendship.friend_id == req.friend_id
+        ).first()
+        if not reverse:
+            new_friendship = Friendship(
+                user_id=current_user.id,
+                friend_id=req.friend_id,
+                status="accepted"
+            )
+            db.add(new_friendship)
+        else:
+            reverse.status = "accepted"
+        db.commit()
+        return {"message": "Friend request mutually accepted"}
+
+    # Otherwise, create a new pending request
     friendship = Friendship(user_id=current_user.id, friend_id=req.friend_id, status="pending")
     db.add(friendship)
     db.commit()
     return {"message": "Friend request sent successfully"}
 
-@app.post("/api/friendships/accept")
-def accept_friend_request(req: FriendRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    friendship = db.query(Friendship).filter(Friendship.user_id == req.friend_id, Friendship.friend_id == current_user.id).first()
+@app.post("/api/friendships/requests/{sender_id}/accept")
+def accept_friend_request(
+    sender_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Find the pending request where current_user is the recipient and sender_id is the sender
+    friendship = (
+        db.query(Friendship)
+        .filter(
+            Friendship.user_id == sender_id,
+            Friendship.friend_id == current_user.id,
+            Friendship.status == "pending"
+        )
+        .first()
+    )
     if not friendship:
-        raise HTTPException(status_code=404, detail="Friend request not found")
+        raise HTTPException(status_code=404, detail="Friend request not found.")
+
+    # Accept the request
     friendship.status = "accepted"
     db.commit()
-    return {"message": "Friend request accepted successfully"}
+
+    # Check if reverse friendship exists
+    reverse = (
+        db.query(Friendship)
+        .filter(
+            Friendship.user_id == current_user.id,
+            Friendship.friend_id == sender_id
+        )
+        .first()
+    )
+    if not reverse:
+        # Create reverse friendship
+        new_friendship = Friendship(
+            user_id=current_user.id,
+            friend_id=sender_id,
+            status="accepted"
+        )
+        db.add(new_friendship)
+        db.commit()
+
+    return {"detail": "Friend request accepted."}
 
 @app.post("/api/friendships/reject")
 def reject_friend_request(req: FriendRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -434,16 +633,89 @@ def reject_friend_request(req: FriendRequest, db: Session = Depends(get_db), cur
 def get_friends(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     friendships = db.query(Friendship).filter(Friendship.user_id == current_user.id, Friendship.status == "accepted").all()
     friends = [db.query(User).filter(User.id == f.friend_id).first() for f in friendships]
+    result = [{"id": friend.id, "username": friend.username} for friend in friends]
+    print(result)
     return [{"id": friend.id, "username": friend.username} for friend in friends]
 
-@app.delete("/api/friendships")
-def remove_friend(req: FriendRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    friendship = db.query(Friendship).filter(Friendship.user_id == current_user.id, Friendship.friend_id == req.friend_id).first()
-    if not friendship:
-        raise HTTPException(status_code=404, detail="Friendship not found")
-    db.delete(friendship)
+@app.get("/api/friendships/requests")
+def get_incoming_friend_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Only show requests where the current user is the recipient and not the sender
+    requests = (
+        db.query(Friendship)
+        .filter(
+            Friendship.friend_id == current_user.id,
+            Friendship.user_id != current_user.id,
+            Friendship.status == "pending"
+        )
+        .all()
+    )
+    result = []
+    for req in requests:
+        sender = db.query(User).filter(User.id == req.user_id).first()
+        if sender:
+            result.append({
+                "id": sender.id,
+                "username": sender.username,
+                "status": req.status
+            })
+    return result
+
+from fastapi import Body
+
+@app.post("/api/users/search")
+def search_users(
+    data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = data.get("query", "")
+    if not query or len(query) < 1:
+        return []
+
+    # Example: filter out self, friends, and pending requests
+    users = (
+        db.query(User)
+        .filter(User.username.ilike(f"%{query}%"))
+        .filter(User.id != current_user.id)
+        .all()
+    )
+
+    # Exclude users who are already friends or have pending requests
+    friendships = db.query(Friendship).filter(
+        ((Friendship.user_id == current_user.id) | (Friendship.friend_id == current_user.id))
+    ).all()
+    exclude_ids = set()
+    for f in friendships:
+        exclude_ids.add(f.user_id)
+        exclude_ids.add(f.friend_id)
+    exclude_ids.discard(current_user.id)
+    filtered_users = [u for u in users if u.id not in exclude_ids]
+
+    return [
+        {"id": u.id, "username": u.username}
+        for u in filtered_users
+    ]
+
+@app.delete("/api/friendships/{friend_id}")
+def unfriend(
+    friend_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Delete both friendship rows (in both directions)
+    friendships = db.query(Friendship).filter(
+        ((Friendship.user_id == current_user.id) & (Friendship.friend_id == friend_id)) |
+        ((Friendship.user_id == friend_id) & (Friendship.friend_id == current_user.id))
+    ).all()
+
+    if not friendships:
+        raise HTTPException(status_code=404, detail="Friendship not found.")
+
+    for friendship in friendships:
+        db.delete(friendship)
     db.commit()
-    return {"message": "Friend removed successfully"}
+
+    return {"detail": "Friendship removed."}
 
 @app.get("/api/dashboard/summary")
 def dashboard_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -452,28 +724,38 @@ def dashboard_summary(db: Session = Depends(get_db), current_user: User = Depend
     total_created = len(payments)
     total_created_amount = sum(p.total_amount for p in payments)
 
-    # Shares owed by the user (not fulfilled)
+    # Shares owed by the user (not fulfilled), EXCLUDE shares where user owes themselves
     shares_owed = db.query(Share).filter(
         Share.owed_by_id == current_user.id
+    ).join(Payment, Share.payment_id == Payment.id).filter(
+        Payment.payer_id != current_user.id
     ).all()
     total_owed = sum(s.amount for s in shares_owed if not s.fulfilled)
     total_owed_count = sum(1 for s in shares_owed if not s.fulfilled)
 
-    # Shares owed to the user (user is payer, not fulfilled)
+    # Shares owed to the user (user is payer, not fulfilled), EXCLUDE shares where user owes themselves
     shares_owed_to_me = (
         db.query(Share)
         .join(Payment, Share.payment_id == Payment.id)
-        .filter(Payment.payer_id == current_user.id, Share.owed_by_id != current_user.id, Share.fulfilled == 0)
+        .filter(
+            Payment.payer_id == current_user.id,
+            Share.owed_by_id != current_user.id,
+            Share.fulfilled == 0
+        )
         .all()
     )
     total_owed_to_me = sum(s.amount for s in shares_owed_to_me)
     total_owed_to_me_count = len(shares_owed_to_me)
 
-    # Shares fulfilled for the user (user is payer, fulfilled)
+    # Shares fulfilled for the user (user is payer, fulfilled), EXCLUDE shares where user owes themselves
     shares_fulfilled_to_me = (
         db.query(Share)
         .join(Payment, Share.payment_id == Payment.id)
-        .filter(Payment.payer_id == current_user.id, Share.owed_by_id != current_user.id, Share.fulfilled == 1)
+        .filter(
+            Payment.payer_id == current_user.id,
+            Share.owed_by_id != current_user.id,
+            Share.fulfilled == 1
+        )
         .all()
     )
     total_fulfilled_to_me = sum(s.amount for s in shares_fulfilled_to_me)
