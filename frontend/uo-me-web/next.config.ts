@@ -8,6 +8,11 @@ const nextConfig = {
       },
     ];
   },
+  allowedDevOrigins: [
+    "https://uo-me.giuli.cat",
+    "http://uo-me.giuli.cat",
+    "http://localhost:3000",
+  ],
 };
 
 module.exports = nextConfig;

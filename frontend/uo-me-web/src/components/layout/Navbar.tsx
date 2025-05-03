@@ -28,7 +28,9 @@ export default function Navbar() {
       <aside className="hidden md:fixed md:flex md:flex-col md:justify-between md:top-0 md:left-0 md:h-screen md:w-56 bg-white shadow-md z-20">
         <div>
           <div className="flex items-center gap-2 px-6 py-6">
-            <span className="font-bold text-xl text-blue-600">UO-Me</span>
+            <Link href="/" className="font-bold text-xl text-blue-600">
+              UO-Me
+            </Link>
           </div>
           <ul className="flex flex-col gap-1 px-2">
             {navItems.map((item) => {
@@ -52,7 +54,9 @@ export default function Navbar() {
           </ul>
         </div>
         <div className="flex flex-col gap-2 px-4 pb-6">
-          <span className="text-sm text-gray-600">{user?.username}</span>
+            <span className="text-sm text-gray-600">
+            {user?.username ? `Welcome back, ${user.username}.` : ""}
+            </span>
           <button
             onClick={handleLogout}
             className="text-sm px-3 py-2 rounded bg-red-50 text-red-600 hover:bg-red-100 w-full text-left"

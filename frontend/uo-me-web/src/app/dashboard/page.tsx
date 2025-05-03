@@ -9,25 +9,170 @@ type Share = {
   payment_id: number;
   user_id: number;
   amount: number;
-  status: string;
+  fulfilled: boolean;
   accepted: boolean;
 };
 
 type Payment = {
   id: number;
   title?: string;
+  payer_id: number;
   description: string;
   total_amount: number;
   created_at: string;
+  due_date?: string;
+  all_fulfilled: boolean;
   expired: boolean;
+  shares: Share[];
 };
+
+function WhatYouOweSection({
+  shares,
+  paymentTitles,
+  usernames,
+}: {
+  shares: Share[];
+  paymentTitles: Record<number, string>;
+  usernames: Record<number, string>;
+}) {
+  if (shares.length === 0) {
+    return <div className="text-gray-500">You do not owe anything.</div>;
+  }
+  return (
+    <div className="flex overflow-x-auto gap-4 py-2">
+      {shares.map((share) => (
+        <div
+          key={share.id}
+          className="min-w-[220px] bg-white rounded shadow p-4 flex flex-col gap-2 items-start"
+        >
+          <span className="font-bold">
+            {paymentTitles[share.payment_id] || (() => {
+              // Fetch payment title if not present
+              fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${share.payment_id}`, {
+                credentials: "include",
+              })
+                .then(res => res.ok ? res.json() : null)
+                .then(data => {
+                  if (data && data.title) {
+                    // Update paymentTitles state if possible
+                    // This assumes setPaymentTitles is available in scope (not here)
+                  }
+                });
+              return `Payment #${share.payment_id}`;
+            })()}
+          </span>
+          <span className="text-gray-600 text-sm">
+            Owed to: {usernames[share.user_id] || share.user_id}
+          </span>
+          <span className="text-lg font-semibold text-red-600">
+            {share.amount}€
+          </span>
+          <span className="text-xs">
+            {share.fulfilled ? (
+              <span className="text-green-600">fulfilled</span>
+            ) : (
+              <span className="text-yellow-600">pending</span>
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PaymentsCreatedSection({
+  payments,
+  usernames,
+  onDelete,
+}: {
+  payments: Payment[];
+  usernames: Record<number, string>;
+  onDelete: (paymentId: number) => void;
+}) {
+  const [openId, setOpenId] = useState<number | null>(null);
+
+  return (
+    <section  >
+      <h2 className="text-lg font-semibold mb-2">Payments You Created</h2>
+      <ul className="flex flex-col gap-2">
+        {payments.length === 0 && (
+          <li className="text-gray-500">No payments created by you.</li>
+        )}
+        {payments.map((payment) => {
+          const allFulfilled =
+            payment.shares.length > 0 && payment.shares.every((s) => s.fulfilled);
+          return (
+            <li
+              key={payment.id}
+              className="bg-white rounded shadow p-3 flex flex-col"
+            >
+              <button
+                className="flex items-center justify-between w-full text-left focus:outline-none"
+                onClick={() => setOpenId(openId === payment.id ? null : payment.id)}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`inline-block w-4 h-4 rounded-full ${
+                      allFulfilled ? "bg-green-500" : "bg-yellow-400"
+                    }`}
+                    title={allFulfilled ? "Completed" : "Pending"}
+                  />
+                  <span className="font-bold">
+                    {payment.title || `Payment #${payment.id}`}
+                  </span>
+                  <span className="text-gray-500 ml-2">{payment.description}</span>
+                </div>
+                <div className="flex items-center gap-4">
+                  <span className="text-2xl font-bold">{payment.total_amount}€</span>
+                </div>
+              </button>
+              {openId === payment.id && (
+                <div className="mt-3 border-t pt-3">
+                  <div className="text-sm text-gray-600 mb-2">
+                    Due date: {payment.due_date ? new Date(payment.due_date).toLocaleDateString() : "N/A"}
+                  </div>
+                  <div className="mb-2">
+                    <span className="font-semibold">Participants:</span>
+                    <ul className="ml-4 mt-1">
+                      {payment.shares.map((share) => (
+                        <li key={share.id} className="flex gap-2 items-center">
+                          <span className="font-medium">{usernames[share.user_id] || share.user_id}</span>
+                          <span className="text-gray-500">— {share.amount}€</span>
+                          <span className={`ml-2 text-xs ${share.fulfilled ? "text-green-600" : "text-yellow-600"}`}>
+                            {share.fulfilled ? "fulfilled" : "pending"}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <button
+                    className={`mt-2 px-4 py-1 rounded font-semibold ${
+                      allFulfilled
+                        ? "bg-red-600 text-white hover:bg-red-700"
+                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    }`}
+                    disabled={!allFulfilled}
+                    onClick={() => allFulfilled && onDelete(payment.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
 
 export default function DashboardPage() {
   const { user, loading } = useAuth();
   const [owedToMe, setOwedToMe] = useState<OwedToMeShare[]>([]);
-  const [sharesToPay, setSharesToPay] = useState<Share[]>([]);
+  const [whatYouOwe, setWhatYouOwe] = useState<Share[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [usernames, setUsernames] = useState<Record<number, string>>({});
+  const [paymentTitles, setPaymentTitles] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   // Fulfill modal state
@@ -44,69 +189,75 @@ export default function DashboardPage() {
       .catch(() => setError("Failed to load shares owed to you"));
   }, []);
 
-  function PaymentTitleFetcher({ paymentId }: { paymentId: number }) {
-    const [title, setTitle] = useState<string>("Loading...");
-    const [error, setError] = useState<string | null>(null);
-
-    useEffect(() => {
-      let isMounted = true;
-      fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${paymentId}`, {
-        credentials: "include",
-      })
-        .then((res) => res.ok ? res.json() : Promise.reject())
-        .then((data) => {
-          if (isMounted) setTitle(data.title || "Untitled Payment");
-        })
-        .catch(() => {
-          if (isMounted) setError("Failed to fetch title");
-        });
-      return () => {
-        isMounted = false;
-      };
-    }, [paymentId]);
-
-    if (error) return <span className="text-red-600">{error}</span>;
-    return <>{title}</>;
-  }
-
-  // Fetch shares the user has to pay (not fulfilled, not to themselves)
+  // Fetch what you owe shares
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/shares`, {
+    fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/shares/owed-by-me`, {
       credentials: "include",
     })
       .then((res) => res.ok ? res.json() : [])
-      .then((data: Share[]) => {
-        setSharesToPay(
-          data.filter(
-            (s) =>
-              s.status !== "fulfilled" &&
-              user &&
-              s.user_id === user.id &&
-              s.accepted &&
-              s.payment_id // filter out shares to self if needed
-          )
-        );
-      })
-      .catch(() => setError("Failed to load your shares"));
-  }, [user]);
+      .then((data: Share[]) => setWhatYouOwe(data))
+      .catch(() => setError("Failed to load what you owe"));
+  }, []);
 
-  // Fetch payments where user is payer
+  // Fetch payment titles for whatYouOwe shares
+  useEffect(() => {
+    const ids = Array.from(new Set(whatYouOwe.map(s => s.payment_id)));
+    const missing = ids.filter(id => !(id in paymentTitles));
+    if (missing.length === 0) return;
+    Promise.all(
+      missing.map(id =>
+        fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${id}`, {
+          credentials: "include",
+        })
+          .then(res => res.ok ? res.json() : null)
+          .then(data => ({ id, title: data?.title || `Payment #${id}` }))
+      )
+    ).then(results => {
+      const newTitles = { ...paymentTitles };
+      results.forEach(({ id, title }) => {
+        newTitles[id] = title;
+      });
+      setPaymentTitles(newTitles);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whatYouOwe]);
+
+  // Fetch payments you created (with shares included)
   useEffect(() => {
     fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments`, {
       credentials: "include",
     })
       .then((res) => res.ok ? res.json() : [])
-      .then((data: Payment[]) => setPayments(data))
+      .then(async (data: { id: number; title?: string }[]) => {
+        // For each payment, fetch full info (with shares) from /api/payments/{id}
+        const paymentsWithShares: Payment[] = await Promise.all(
+          data.map(async (p) => {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${p.id}`, {
+              credentials: "include",
+            });
+            if (!res.ok) return null;
+            const payment = await res.json();
+            return payment;
+          })
+        );
+        setPayments(paymentsWithShares.filter(Boolean) as Payment[]);
+        // Set payment titles for quick lookup (for payments created by you)
+        const titles: Record<number, string> = { ...paymentTitles };
+        paymentsWithShares.forEach((p) => {
+          if (p && p.id) titles[p.id] = p.title || `Payment #${p.id}`;
+        });
+        setPaymentTitles(titles);
+      })
       .catch(() => setError("Failed to load your payments"));
   }, []);
 
   // Fetch usernames for all relevant user_ids
   useEffect(() => {
-    const ids = [
-      ...owedToMe.map((s) => s.user_id),
-      ...sharesToPay.map((s) => s.user_id),
-    ];
-    const uniqueIds = Array.from(new Set(ids)).filter((id) => !(id in usernames));
+    const ids = new Set<number>();
+    payments.forEach((p) => p.shares.forEach((s) => ids.add(s.user_id)));
+    owedToMe.forEach((s) => ids.add(s.user_id));
+    whatYouOwe.forEach((s) => ids.add(s.user_id));
+    const uniqueIds = Array.from(ids).filter((id) => !(id in usernames));
     if (uniqueIds.length === 0) return;
     Promise.all(
       uniqueIds.map((id) =>
@@ -124,9 +275,21 @@ export default function DashboardPage() {
       setUsernames(newNames);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [owedToMe, sharesToPay]);
+  }, [payments, owedToMe, whatYouOwe]);
 
-  // Fulfill logic
+  const handleDelete = async (paymentId: number) => {
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/payments/${paymentId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Delete failed");
+      setPayments((prev) => prev.filter((p) => p.id !== paymentId));
+    } catch (err) {
+      alert("Error deleting payment.");
+    }
+  };
+
   const handleFulfill = async (share: OwedToMeShare) => {
     setFulfillingId(share.id);
     setFulfillError(null);
@@ -162,7 +325,7 @@ export default function DashboardPage() {
   return (
     <>
       <Navbar />
-      <main className="min-h-screen bg-gray-50 p-4 flex flex-col gap-8 md:ml-56">
+      <main className="min-h-screen p-6 md:ml-56">
         <h1 className="text-2xl font-bold mb-4">Dashboard</h1>
         <section>
           <h2 className="text-lg font-semibold mb-2">Owed To You</h2>
@@ -181,65 +344,18 @@ export default function DashboardPage() {
           )}
         </section>
         <section>
-          <h2 className="text-lg font-semibold mb-2">Shares You Owe</h2>
-          <ul className="flex flex-col gap-2">
-            {sharesToPay.length === 0 && (
-              <li className="text-gray-500">You do not owe any shares.</li>
-            )}
-            {sharesToPay.map((share) => (
-              <li
-                key={share.id}
-                className="bg-white rounded shadow p-3 flex flex-col md:flex-row md:items-center md:justify-between"
-              >
-                <div>
-                  <span className="font-bold">
-                    Payment #{share.payment_id}
-                  </span>
-                  <span className="block text-sm text-gray-600">
-                    Amount: {share.amount}
-                  </span>
-                  <span className="block text-sm text-gray-600">
-                    Status: {share.status}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
+          <h2 className="text-lg font-semibold mb-2">What You Owe</h2>
+          <WhatYouOweSection
+            shares={whatYouOwe}
+            paymentTitles={paymentTitles}
+            usernames={usernames}
+          />
         </section>
-        <section>
-          <h2 className="text-lg font-semibold mb-2">Payments You Created</h2>
-          <ul className="flex flex-col gap-2">
-            {payments.length === 0 && (
-              <li className="text-gray-500">No payments created by you.</li>
-            )}
-            {payments.map((payment) => (
-              <li
-                key={payment.id}
-                className="bg-white rounded shadow p-3 flex flex-col md:flex-row md:items-center md:justify-between"
-              >
-                <div>
-                    <span className="font-bold">
-                    {payment.title ? payment.title : (
-                      <PaymentTitleFetcher paymentId={payment.id} />
-                    )}
-                    </span>
-                  <span className="block text-sm text-gray-600">
-                    {payment.description}
-                  </span>
-                  <span className="block text-sm text-gray-600">
-                    Total Amount: ${payment.total_amount}
-                  </span>
-                  <span className="block text-sm text-gray-600">
-                    Created: {new Date(payment.created_at).toLocaleString()}
-                  </span>
-                  <span className="block text-sm text-gray-600">
-                    Expired: {payment.expired ? "Yes" : "No"}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
+        <PaymentsCreatedSection
+          payments={payments}
+          usernames={usernames}
+          onDelete={handleDelete}
+        />
       </main>
     </>
   );

@@ -1,12 +1,13 @@
+// Project: UO-me
 import React from "react";
-import TopNavbar from "@/components/layout/TopNavbar";
+import Navbar from "@/components/layout/Navbar";
 
 export default function AboutPage() {
   return (
     <>
-      <TopNavbar />
-      <main className="min-h-screen flex items-center justify-center p-6">
-        <section className="max-w-4xl w-full bg-white rounded-2xl shadow p-8 space-y-6">
+      <Navbar />
+      <main className="min-h-screen p-6 md:ml-56">
+        <section className="max-w-4xl mx-auto bg-white rounded-2xl shadow p-8 space-y-6">
           <h1 className="text-3xl font-bold text-gray-800">About UO-me</h1>
 
           <p className="text-gray-700 text-lg">

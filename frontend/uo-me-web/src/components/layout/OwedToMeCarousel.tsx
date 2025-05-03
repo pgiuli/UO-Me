@@ -80,7 +80,7 @@ export default function OwedToMeCarousel({
             >
               <div className="font-bold text-lg">{getUsername(share.user_id)}</div>
               <span className="text-sm text-gray-500 block">owes you</span>
-              <div className="text-red-500 font-semibold text-xl mt-1">{share.amount}€</div>
+              <div className="text-green-500 font-semibold text-xl mt-1">{share.amount}€</div>
             </button>
             {activeIndex === idx && (
               <div className="mt-2 bg-gray-50 border rounded p-4 shadow w-full text-left">

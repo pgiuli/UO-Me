@@ -9,3 +9,4 @@ pydantic[email]
 fastapi-utils
 python-multipart
 typing_inspect
+Pillow

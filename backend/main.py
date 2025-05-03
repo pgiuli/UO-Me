@@ -15,6 +15,11 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from datetime import datetime, timedelta
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
+from fastapi_utils.tasks import repeat_every
+from fastapi import Path
+from fastapi import Query
+from PIL import Image
+from dotenv import load_dotenv
 
 # --- Database setup ---
 DATABASE_URL = "sqlite:///./uo_me.db"
@@ -43,6 +48,7 @@ class Payment(Base):
     total_amount = Column(Float)
     created_at = Column(String, default=lambda: datetime.utcnow().isoformat())
     expired = Column(Integer, default=0)  # 0 = active, 1 = expired
+    due_date = Column(String, nullable=True)  # Optional due date
 
 class Share(Base):
     __tablename__ = "shares"
@@ -109,7 +115,8 @@ class Token(BaseModel):
     token_type: str
 
 # --- Auth/JWT setup ---
-SECRET_KEY = "your-secret-key"  # Replace with a secure random key in production!
+load_dotenv()
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Fallback for dev
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 week
 
@@ -166,11 +173,17 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # or ["*"] for all origins (not recommended for production)
+    allow_origins=[
+        "http://localhost:3000",
+        "https://uo-me.giuli.cat"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.options("/{rest_of_path:path}", include_in_schema=False)
+async def preflight_handler(rest_of_path: str):
+    return Response()
 
 # --- Static files for profile pictures ---
 PROFILE_PICS_DIR = "static/profile_pics"
@@ -192,11 +205,23 @@ def upload_profile_picture(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    ext = os.path.splitext(file.filename)[1]
+    ext = os.path.splitext(file.filename)[1].lower()
     filename = f"user_{current_user.id}{ext}"
     file_path = os.path.join(PROFILE_PICS_DIR, filename)
-    with open(file_path, "wb") as buffer:
+
+    # Save uploaded file temporarily
+    temp_path = file_path + ".tmp"
+    with open(temp_path, "wb") as buffer:
         buffer.write(file.file.read())
+
+    # Open and resize image
+    with Image.open(temp_path) as img:
+        img = img.convert("RGB")
+        img = img.resize((200, 200))
+        img.save(file_path, format="JPEG", quality=90)
+
+    os.remove(temp_path)
+
     # Save the relative path or URL in the user record
     current_user.profile_picture = f"{PROFILE_PICS_DIR}/{filename}"
     db.commit()
@@ -237,8 +262,8 @@ def login(response: Response, user: UserLogin, db: Session = Depends(get_db)):
         value=access_token,
         httponly=True,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        samesite="lax",
-        secure=False  # Set to True in production (HTTPS)
+        samesite="none",
+        secure=True,
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -309,6 +334,16 @@ def create_payment(
                 detail=f"User {share.user_id} is not the payer or a friend of the payer"
             )
 
+    # Validate due_date format if provided (ISO 8601)
+    due_date_str = None
+    if payment.due_date:
+        try:
+            # Accept both date and datetime strings
+            parsed_due_date = datetime.fromisoformat(payment.due_date)
+            due_date_str = parsed_due_date.isoformat()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid due_date format. Use ISO 8601 format.")
+
     # Create payment
     db_payment = Payment(
         payer_id=current_user.id,
@@ -316,24 +351,21 @@ def create_payment(
         description=payment.description,
         total_amount=payment.total_amount,
         created_at=datetime.utcnow().isoformat(),
-        # Store due_date as string if provided, else None
-        # You may want to add a due_date column to Payment model for production
+        due_date=due_date_str
     )
-    if payment.due_date:
-        # Optionally, you can store due_date in a custom attribute or extend the Payment model
-        setattr(db_payment, "due_date", payment.due_date)
     db.add(db_payment)
     db.commit()
     db.refresh(db_payment)
 
     # Create shares
     for share in payment.shares:
+        is_payer = share.user_id == current_user.id
         db_share = Share(
             payment_id=db_payment.id,
             owed_by_id=share.user_id,
             amount=share.amount,
-            fulfilled=0,
-            accepted=0,
+            fulfilled=1 if is_payer else 0,
+            accepted=1 if is_payer else 0,
             created_at=datetime.utcnow().isoformat()
         )
         db.add(db_share)
@@ -341,6 +373,20 @@ def create_payment(
 
     return {"message": "Payment and shares created successfully", "payment_id": db_payment.id}
 
+@app.delete("/api/payments/{payment_id}")
+def delete_payment(
+    payment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    payment = db.query(Payment).filter(Payment.id == payment_id, Payment.payer_id == current_user.id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    # Delete all shares associated with this payment
+    db.query(Share).filter(Share.payment_id == payment_id).delete()
+    db.delete(payment)
+    db.commit()
+    return {"message": "Payment and associated shares deleted successfully"}
 
 @app.get("/api/payments", response_model=List[PaymentOut])
 def get_payments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -387,9 +433,20 @@ def get_payment_by_id(
         "description": payment.description,
         "total_amount": payment.total_amount,
         "created_at": payment.created_at,
+        "due_date": payment.due_date,
         "shares": share_objs,
         "all_fulfilled": all_fulfilled,
-        "expired": bool(payment.expired)
+        "expired": bool(payment.expired),
+        "shares": [
+            {
+                "id": s.id,
+                "user_id": s.owed_by_id,
+                "amount": s.amount,
+                "fulfilled": bool(s.fulfilled),
+                "accepted": bool(s.accepted)
+    }
+            for s in shares
+        ]
     }
 
 
@@ -418,10 +475,6 @@ def get_unfulfilled_shares_owed_by_me(db: Session = Depends(get_db), current_use
     ]
 
 # --- Expire Payments ---
-from fastapi_utils.tasks import repeat_every
-from fastapi import Path
-from fastapi import Query
-
 @app.on_event("startup")
 @repeat_every(seconds=60)  # Check every minute
 def expire_payments_task():
