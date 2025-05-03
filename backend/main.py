@@ -4,6 +4,8 @@ from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, 
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Body
+from fastapi.responses import FileResponse
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
@@ -12,6 +14,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from datetime import datetime, timedelta
 from sqlalchemy import or_
+from sqlalchemy.orm import joinedload
 
 # --- Database setup ---
 DATABASE_URL = "sqlite:///./uo_me.db"
@@ -172,7 +175,15 @@ app.add_middleware(
 # --- Static files for profile pictures ---
 PROFILE_PICS_DIR = "static/profile_pics"
 os.makedirs(PROFILE_PICS_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/static/profile_pics/{filename}")
+def serve_profile_pic(filename: str):
+    file_path = os.path.join(PROFILE_PICS_DIR, filename)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
+    # Serve placeholder if not found
+    placeholder_path = os.path.join("static", "placeholderpic.png")
+    return FileResponse(placeholder_path)
 
 # --- Profile Picture Upload ---
 @app.post("/api/users/profile-picture")
@@ -187,7 +198,7 @@ def upload_profile_picture(
     with open(file_path, "wb") as buffer:
         buffer.write(file.file.read())
     # Save the relative path or URL in the user record
-    current_user.profile_picture = f"/static/{PROFILE_PICS_DIR}/{filename}"
+    current_user.profile_picture = f"{PROFILE_PICS_DIR}/{filename}"
     db.commit()
     return {"url": current_user.profile_picture}
 
@@ -351,7 +362,7 @@ def get_payments(db: Session = Depends(get_db), current_user: User = Depends(get
     return result
 
 @app.get("/api/payments/{payment_id}")
-def get_payment(
+def get_payment_by_id(
     payment_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -359,19 +370,44 @@ def get_payment(
     payment = db.query(Payment).filter(Payment.id == payment_id).first()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
-
-    # Check if user is involved (payer or has a share)
-    user_share = db.query(Share).filter(
-        Share.payment_id == payment_id,
-        Share.owed_by_id == current_user.id
-    ).first()
-    if not user_share and payment.payer_id != current_user.id:
+    # Only allow access if the user is the payer or is involved in the shares
+    user_involved = (
+        payment.payer_id == current_user.id or
+        db.query(Share).filter(Share.payment_id == payment.id, Share.owed_by_id == current_user.id).first() is not None
+    )
+    if not user_involved:
         raise HTTPException(status_code=403, detail="Not authorized to view this payment")
+    shares = db.query(Share).filter(Share.payment_id == payment.id).all()
+    share_objs = [PaymentShare(user_id=s.owed_by_id, amount=s.amount) for s in shares]
+    all_fulfilled = all(s.fulfilled for s in shares) if shares else False
+    return {
+        "id": payment.id,
+        "title": payment.title,
+        "description": payment.description,
+        "total_amount": payment.total_amount,
+        "created_at": payment.created_at,
+        "shares": share_objs,
+        "all_fulfilled": all_fulfilled,
+        "expired": bool(payment.expired)
+    }
 
-    # Get all shares for this payment
-    shares = db.query(Share).filter(Share.payment_id == payment_id).all()
-    shares_data = [
+
+@app.get("/api/shares/owed-by-me")
+def get_unfulfilled_shares_owed_by_me(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    shares = (
+        db.query(Share)
+        .join(Payment, Share.payment_id == Payment.id)
+        .filter(
+            Share.owed_by_id == current_user.id,
+            Payment.payer_id != current_user.id,
+            Share.fulfilled == 0
+        )
+        .all()
+    )
+    return [
         {
+            "id": s.id,
+            "payment_id": s.payment_id,
             "user_id": s.owed_by_id,
             "amount": s.amount,
             "accepted": bool(s.accepted),
@@ -379,22 +415,6 @@ def get_payment(
         }
         for s in shares
     ]
-
-    # Try to get due_date if present (may not exist)
-    due_date = getattr(payment, "due_date", None)
-
-    return {
-        "id": payment.id,
-        "title": payment.title,
-        "description": payment.description,
-        "total_amount": payment.total_amount,
-        "payer_id": payment.payer_id,
-        "created_at": payment.created_at,
-        "due_date": due_date,
-        "expired": bool(payment.expired),
-        "shares": shares_data
-    }
-
 
 # --- Expire Payments ---
 from fastapi_utils.tasks import repeat_every
@@ -659,7 +679,6 @@ def get_incoming_friend_requests(db: Session = Depends(get_db), current_user: Us
             })
     return result
 
-from fastapi import Body
 
 @app.post("/api/users/search")
 def search_users(

@@ -6,9 +6,13 @@ import { useAuth } from "@/hooks/useAuth";
 
 type PaymentDetails = {
   id: number;
-  title: string;
+  title?: string;
   description: string;
-  payer_id: number;
+  total_amount: number;
+  created_at: string;
+  shares: { user_id: number; amount: number }[];
+  all_fulfilled?: boolean;
+  expired?: boolean;
 };
 
 type Share = {
@@ -17,6 +21,7 @@ type Share = {
   user_id: number;
   amount: number;
   accepted: boolean;
+  status?: string;
 };
 
 export default function NotificationsPage() {
@@ -39,8 +44,13 @@ export default function NotificationsPage() {
     })
       .then(res => res.json())
       .then(async (shares: Share[]) => {
-        // Only shares not accepted, assigned to user
-        const filtered = shares.filter(s => !s.accepted && s.user_id === user.id);
+        // Only shares owed by the current user, not accepted, and status is 'pending'
+        const filtered = shares.filter(
+          s =>
+            String(s.user_id) === String(user.id) &&
+            s.accepted === false &&
+            s.status === "pending"
+        );
 
         // Fetch payment details for all unique payment_ids
         const uniquePaymentIds = Array.from(new Set(filtered.map(s => s.payment_id)));
@@ -60,36 +70,16 @@ export default function NotificationsPage() {
           paymentResults.forEach(payment => {
             if (payment && payment.id) {
               paymentMap[payment.id] = payment;
-              payerIdSet.add(payment.payer_id);
+              // If you want payer names, you can add payerIdSet.add(payment.payer_id);
             }
           });
         }
 
-        // Now filter out shares where user is the payer
-        const finalShares = filtered.filter(s => {
-          const payment = paymentMap[s.payment_id];
-          return payment && payment.payer_id !== user.id;
-        });
-
-        setPendingShares(finalShares);
+        setPendingShares(filtered);
         setPayments(paymentMap);
 
-        // Fetch payer usernames for all payers (no fallback, must be present)
-        const payerIds = Array.from(payerIdSet);
-        const payerNameMap: Record<number, string> = {};
-        await Promise.all(
-          payerIds.map(async (payerId) => {
-            if (payerId in payerNameMap) return;
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/users/${payerId}`, {
-              credentials: "include",
-            });
-            if (res.ok) {
-              const data = await res.json();
-              payerNameMap[payerId] = data.username;
-            }
-          })
-        );
-        setPayerNames(payerNameMap);
+        // Optionally fetch payer usernames if you want to show them
+        // (not shown here for brevity)
       })
       .catch(() => setError("Failed to load pending shares"));
   }, [user, accepting]);
@@ -126,25 +116,19 @@ export default function NotificationsPage() {
             )}
             {pendingShares.map((share) => {
               const payment = payments[share.payment_id];
-              // Always show username, never fallback to "Unknown"
-              const payerName =
-                payment && payment.payer_id && payerNames[payment.payer_id]
-                  ? payerNames[payment.payer_id]
-                  : "";
               return (
                 <li key={share.id} className="bg-white rounded shadow p-3 flex flex-col md:flex-row md:items-center md:justify-between">
                   <div>
                     <span className="font-bold">
-                      {payment ? payment.title : `Payment #${share.payment_id}`}
+                      {payment && payment.title
+                        ? payment.title
+                        : `Payment #${share.payment_id}`}
                     </span>
                     <span className="block text-sm text-gray-600">
                       {payment ? payment.description : ""}
                     </span>
                     <span className="block text-sm text-gray-600">
                       Amount: ${share.amount}
-                    </span>
-                    <span className="block text-sm text-gray-600">
-                      Payer: {payerName}
                     </span>
                   </div>
                   <div className="mt-2 md:mt-0 flex gap-2 items-center">

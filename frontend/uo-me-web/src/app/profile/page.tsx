@@ -28,7 +28,10 @@ export default function ProfilePage() {
         setProfile(data);
         setUsername(data.username);
         setEmail(data.email);
-        setProfilePic(data.profile_picture || null);
+        setProfilePic(
+          data.profile_picture ||
+          (data.id ? `/static/profile_pics/user_${data.id}.png` : null)
+        );
       })
       .catch(() => setError("Failed to load profile"));
   }, [user]);

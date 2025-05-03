@@ -3,6 +3,10 @@ import { useEffect, useState } from "react";
 import Navbar from "@/components/layout/Navbar";
 import { useAuth } from "@/hooks/useAuth";
 
+function getProfilePic(profile_picture: string | null, id: number) {
+  return profile_picture || `/static/profile_pics/user_${id}.png`;
+}
+
 export default function SocialPage() {
   const { user, loading } = useAuth();
   const [friends, setFriends] = useState<any[]>([]);
@@ -161,7 +165,7 @@ export default function SocialPage() {
               >
                 <div className="flex items-center gap-3">
                   <img
-                    src={"/default-avatar.png"}
+                    src={getProfilePic(req.profile_picture, req.id)}
                     alt={req.username}
                     className="w-10 h-10 rounded-full object-cover"
                   />
@@ -202,7 +206,7 @@ export default function SocialPage() {
               >
                 <div className="flex items-center gap-3">
                   <img
-                    src={friend.profile_picture || "/default-avatar.png"}
+                    src={getProfilePic(friend.profile_picture, friend.id)}
                     alt={friend.username}
                     className="w-10 h-10 rounded-full object-cover"
                   />
@@ -264,7 +268,7 @@ export default function SocialPage() {
               >
                 <div className="flex items-center gap-3">
                   <img
-                    src={result.profile_picture || "/default-avatar.png"}
+                    src={getProfilePic(result.profile_picture, result.id)}
                     alt={result.username}
                     className="w-10 h-10 rounded-full object-cover"
                   />
