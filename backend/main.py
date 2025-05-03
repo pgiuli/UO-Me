@@ -97,7 +97,6 @@ class ShareAccept(BaseModel):
     share_id: int
 class ShareFulfill(BaseModel):
     share_id: int
-    amount: float
 
 class FriendRequest(BaseModel):
     friend_id: int
@@ -171,9 +170,9 @@ app.add_middleware(
 )
 
 # --- Static files for profile pictures ---
-PROFILE_PICS_DIR = "profile_pics"
+PROFILE_PICS_DIR = "static/profile_pics"
 os.makedirs(PROFILE_PICS_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # --- Profile Picture Upload ---
 @app.post("/api/users/profile-picture")

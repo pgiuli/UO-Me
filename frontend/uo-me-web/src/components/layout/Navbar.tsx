@@ -1,40 +1,26 @@
 "use client";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { HomeIcon, BellIcon, PlusCircleIcon, UsersIcon, UserCircleIcon } from "@heroicons/react/24/outline";
 import { useAuth } from "@/hooks/useAuth";
 
 const navItems = [
-  {
-    name: "Dashboard",
-    href: "/dashboard",
-    icon: HomeIcon,
-  },
-  {
-    name: "Notifications",
-    href: "/notifications",
-    icon: BellIcon,
-  },
-  {
-    name: "Create",
-    href: "/create-payment",
-    icon: PlusCircleIcon,
-  },
-  {
-    name: "Social",
-    href: "/social",
-    icon: UsersIcon,
-  },
-  {
-    name: "Profile",
-    href: "/profile",
-    icon: UserCircleIcon,
-  },
+  { name: "Dashboard", href: "/dashboard", icon: HomeIcon },
+  { name: "Notifications", href: "/notifications", icon: BellIcon },
+  { name: "Create", href: "/create-payment", icon: PlusCircleIcon },
+  { name: "Social", href: "/social", icon: UsersIcon },
+  { name: "Profile", href: "/profile", icon: UserCircleIcon },
 ];
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
   const { user, logout } = useAuth();
+
+  const handleLogout = async () => {
+    await logout();
+    router.push("/login");
+  };
 
   return (
     <>
@@ -68,7 +54,7 @@ export default function Navbar() {
         <div className="flex flex-col gap-2 px-4 pb-6">
           <span className="text-sm text-gray-600">{user?.username}</span>
           <button
-            onClick={logout}
+            onClick={handleLogout}
             className="text-sm px-3 py-2 rounded bg-red-50 text-red-600 hover:bg-red-100 w-full text-left"
           >
             Logout
@@ -96,8 +82,6 @@ export default function Navbar() {
           })}
         </ul>
       </nav>
-      {/* Spacer for mobile navbar */}
-      <div className="md:hidden h-14" />
       {/* Spacer for desktop sidebar */}
       <div className="hidden md:block md:w-56" />
     </>

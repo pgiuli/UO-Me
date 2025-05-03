@@ -1,7 +1,13 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
-  /* config options here */
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  async rewrites() {
+    return [
+      {
+        source: '/static/:path*',
+        destination: 'http://localhost:8000/static/:path*', // Proxy only /static to FastAPI
+      },
+    ];
+  },
 };
 
-export default nextConfig;
+module.exports = nextConfig;
