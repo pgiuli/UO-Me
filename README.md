@@ -19,7 +19,7 @@ The OU-Me project is built using the following technologies:
 
 ### Clone the Repository
 ```bash
-    git clone https://
+    git clone https://github.com/pgiuli/UO-me
 ```
 
 ### Set up Python Environment
