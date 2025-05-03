@@ -383,6 +383,7 @@ def get_payment_by_id(
     return {
         "id": payment.id,
         "title": payment.title,
+        "payer_id": payment.payer_id,
         "description": payment.description,
         "total_amount": payment.total_amount,
         "created_at": payment.created_at,

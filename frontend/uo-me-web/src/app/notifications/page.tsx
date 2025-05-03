@@ -10,6 +10,7 @@ type PaymentDetails = {
   description: string;
   total_amount: number;
   created_at: string;
+  payer_id: number;
   shares: { user_id: number; amount: number }[];
   all_fulfilled?: boolean;
   expired?: boolean;
@@ -28,7 +29,6 @@ export default function NotificationsPage() {
   const { user, loading } = useAuth();
   const [pendingShares, setPendingShares] = useState<Share[]>([]);
   const [payments, setPayments] = useState<Record<number, PaymentDetails>>({});
-  const [payerNames, setPayerNames] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [accepting, setAccepting] = useState<number | null>(null);
   const router = useRouter();
@@ -55,7 +55,6 @@ export default function NotificationsPage() {
         // Fetch payment details for all unique payment_ids
         const uniquePaymentIds = Array.from(new Set(filtered.map(s => s.payment_id)));
         let paymentMap: Record<number, PaymentDetails> = {};
-        let payerIdSet = new Set<number>();
 
         if (uniquePaymentIds.length > 0) {
           const paymentResults = await Promise.all(
@@ -70,16 +69,18 @@ export default function NotificationsPage() {
           paymentResults.forEach(payment => {
             if (payment && payment.id) {
               paymentMap[payment.id] = payment;
-              // If you want payer names, you can add payerIdSet.add(payment.payer_id);
             }
           });
         }
 
-        setPendingShares(filtered);
-        setPayments(paymentMap);
+        // Only show shares where the payer is NOT the current user
+        const finalShares = filtered.filter(s => {
+          const payment = paymentMap[s.payment_id];
+          return payment && payment.payer_id !== user.id;
+        });
 
-        // Optionally fetch payer usernames if you want to show them
-        // (not shown here for brevity)
+        setPendingShares(finalShares);
+        setPayments(paymentMap);
       })
       .catch(() => setError("Failed to load pending shares"));
   }, [user, accepting]);
